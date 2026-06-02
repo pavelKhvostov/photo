@@ -1,0 +1,31 @@
+# Зависимости
+node_modules/
+.pnp
+.pnp.js
+
+# Next.js
+.next/
+out/
+
+# Сборка
+dist/
+
+# Переменные окружения (НИКОГДА не коммитить .env.local)
+.env.local
+.env.*.local
+
+# OS
+.DS_Store
+*.pem
+
+# Debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Vercel — мы НЕ используем Vercel (152-ФЗ, деплой только в РФ)
+.vercel
+
+# TypeScript
+*.tsbuildinfo
+next-env.d.ts

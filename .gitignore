@@ -1,0 +1,33 @@
+# ── ОС ──────────────────────────────────────────────
+.DS_Store
+*.log
+
+# ── Node / Next.js (web) ────────────────────────────
+node_modules/
+web/.next/
+web/out/
+web/build/
+web/.turbo/
+*.tsbuildinfo
+next-env.d.ts
+
+# ── Секреты и окружение ─────────────────────────────
+.env
+.env.local
+.env*.local
+# .env.local.example — коммитим как шаблон
+
+# ── Локальный HTTPS / сертификаты (mkcert/caddy) ────
+.https/
+*.crt
+*.key
+*.pem
+web/public/caddy-ca.crt
+
+# ── Supabase локальный стек ─────────────────────────
+supabase/.branches/
+supabase/.temp/
+supabase/.env
+
+# ── Демо/временное ──────────────────────────────────
+# сид и тесты RLS — нужны, их НЕ игнорируем
