@@ -1,0 +1,39 @@
+# Caddyfile.production — reverse-proxy + автоматический TLS (Let's Encrypt) для «Кадр».
+# Домены должны указывать (A-запись) на IP VM. Caddy сам получит и обновит сертификаты.
+# Запуск: caddy run --config deploy/Caddyfile.production
+#
+# Замени kadr.ru / api.kadr.ru на свои домены и email для Let's Encrypt.
+
+{
+	email admin@kadr.ru
+	# Только TLS 1.2+ (152-ФЗ in-transit). HTTP автоматически редиректится на HTTPS.
+}
+
+# --- Гостевой web (PWA, Next.js) -------------------------------------------
+kadr.ru, www.kadr.ru {
+	encode gzip zstd
+	reverse_proxy 127.0.0.1:3000
+
+	# Безопасные заголовки. CSP запрещает зарубежные домены (152-ФЗ: аналитика
+	# только российская). Подстрой connect-src под свой api-домен и Метрику.
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Content-Security-Policy "default-src 'self'; img-src 'self' https://api.kadr.ru data: blob:; connect-src 'self' https://api.kadr.ru https://mc.yandex.ru; script-src 'self' 'unsafe-inline' https://mc.yandex.ru; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'"
+		-Server
+	}
+}
+
+# --- Supabase API (Kong gateway) -------------------------------------------
+api.kadr.ru {
+	encode gzip zstd
+	reverse_proxy 127.0.0.1:8000
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		-Server
+	}
+}

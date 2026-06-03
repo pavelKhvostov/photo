@@ -1,0 +1,9 @@
+# Заполненные секреты прода — НИКОГДА не коммитим
+.env.production
+.env
+*.key
+*.pem
+*.crt
+# Том данных Postgres/Storage (если монтируется локально)
+volumes/
+data/
