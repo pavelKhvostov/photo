@@ -44,6 +44,10 @@ export type PhotoUrlResult =
   | { ok: true; url: string }
   | { ok: false; code: string; message: string }
 
+export type DiscardResult =
+  | { ok: true }
+  | { ok: false; code: string; message: string }
+
 // ---- Кэш подписанных URL ------------------------------------------------
 
 interface CachedUrl {
@@ -198,6 +202,46 @@ export async function confirmUpload(photoId: string): Promise<ConfirmResult> {
 
   const data = body as { ok: boolean; thumb_ready: boolean }
   return { ok: true, thumb_ready: data.thumb_ready ?? false }
+}
+
+// ---- discardPhoto -------------------------------------------------------
+
+/**
+ * Отменяет зарезервированный кадр (uploaded=false) — best-effort, не бросает.
+ * POST /functions/v1/discard-photo
+ * Вызывается при «Переснять», чтобы не оставлять мусор в БД.
+ */
+export async function discardPhoto(photoId: string): Promise<DiscardResult> {
+  try {
+    const token = await getAccessToken()
+    if (!token) {
+      return { ok: false, code: 'auth_error', message: 'Нет активной сессии.' }
+    }
+
+    const response = await fetch(`${SUPABASE_URL}/functions/v1/discard-photo`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`,
+        'apikey': SUPABASE_ANON_KEY,
+      },
+      body: JSON.stringify({ photo_id: photoId }),
+    })
+
+    if (!response.ok) {
+      let code = 'unknown_error'
+      try {
+        const err = await response.json() as { error?: { code?: string } }
+        code = err?.error?.code ?? code
+      } catch { /* ignore */ }
+      return { ok: false, code, message: 'Не удалось отменить резерв кадра.' }
+    }
+
+    return { ok: true }
+  } catch {
+    // best-effort: сеть недоступна или иная ошибка — не блокируем UI
+    return { ok: false, code: 'network_error', message: 'Нет соединения с сервером.' }
+  }
 }
 
 // ---- listPhotos ---------------------------------------------------------

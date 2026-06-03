@@ -18,7 +18,7 @@ import Link from 'next/link'
 import type { GuestSession, CameraStyle } from '@/lib/types'
 import { GUEST_SESSION_KEY } from '@/lib/types'
 import { applyFilter, captureVideoFrame } from '@/lib/filters'
-import { requestUploadUrl, uploadBlob, confirmUpload } from '@/lib/photos'
+import { requestUploadUrl, uploadBlob, confirmUpload, discardPhoto } from '@/lib/photos'
 
 interface Props {
   params: Promise<{ code: string }>
@@ -652,6 +652,15 @@ export default function CameraPage({ params }: Props) {
   // ---- Переснять ----------------------------------------------------------
 
   function handleRetake() {
+    // best-effort: удаляем зарезервированный кадр (uploaded=false) из БД,
+    // чтобы не накапливался мусор. Не блокируем UI — fire-and-forget.
+    const pending = pendingUploadRef.current
+    if (pending?.photo_id) {
+      discardPhoto(pending.photo_id).catch(() => {
+        // игнорируем ошибку — это best-effort
+      })
+    }
+
     const currentPUrl = previewUrl
     setPreviewUrl(null)
     previewBlobRef.current = null

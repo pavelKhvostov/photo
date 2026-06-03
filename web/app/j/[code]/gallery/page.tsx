@@ -7,6 +7,10 @@
  * - «Мои» — всегда видны свои uploaded кадры.
  * - «Общая» — RLS отдаёт чужие только после проявки. До проявки показываем плашку.
  *
+ * reveal_at/status берём с сервера (GET public-event) при монтировании, чтобы
+ * отражать актуальное состояние даже если хост сдвинул время или нажал «Проявить».
+ * При ошибке запроса — fallback на значение из sessionStorage (не падать).
+ *
  * Фото получаем по подписанным URL через getPhotoUrl (ИНВАРИАНТ: бакет приватный).
  * Нет зарубежних сервисов, аналитики, CDN.
  * Все вызовы к API — только в useEffect/обработчиках (не SSR).
@@ -37,7 +41,8 @@ function formatRevealTime(revealAt: string): string {
   return `${hh}:${mm} ${dd}.${mo}`
 }
 
-function isRevealed(revealAt: string | null): boolean {
+function checkIsRevealed(revealAt: string | null, status?: string | null): boolean {
+  if (status === 'revealed') return true
   if (!revealAt) return true
   return new Date(revealAt) <= new Date()
 }
@@ -439,6 +444,38 @@ const PS: Record<string, CSSProperties> = {
   },
 }
 
+// ---- Запрос актуальных данных события -----------------------------------
+
+const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!
+const SUPABASE_ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+
+interface PublicEventData {
+  title: string
+  camera_style: string
+  status: string
+  reveal_at: string | null
+  starts_at: string | null
+  cover_url: string | null
+}
+
+async function fetchPublicEvent(shortCode: string): Promise<PublicEventData | null> {
+  try {
+    const response = await fetch(
+      `${SUPABASE_URL}/functions/v1/public-event?short_code=${encodeURIComponent(shortCode)}`,
+      {
+        headers: {
+          'apikey': SUPABASE_ANON_KEY,
+        },
+      },
+    )
+    if (!response.ok) return null
+    const data = await response.json() as PublicEventData
+    return data
+  } catch {
+    return null
+  }
+}
+
 // ---- Главный компонент ---------------------------------------------------
 
 export default function GalleryPage({ params }: Props) {
@@ -446,6 +483,10 @@ export default function GalleryPage({ params }: Props) {
 
   const [session, setSession] = useState<GuestSession | null>(null)
   const [sessionLoaded, setSessionLoaded] = useState(false)
+
+  // reveal_at/status — приоритет серверного значения, fallback на сессию
+  const [liveRevealAt, setLiveRevealAt] = useState<string | null | undefined>(undefined)
+  const [liveStatus, setLiveStatus] = useState<string | null | undefined>(undefined)
 
   const [activeTab, setActiveTab] = useState<GalleryTab>('mine')
   const [myPhotos, setMyPhotos] = useState<PhotoRow[]>([])
@@ -465,6 +506,22 @@ export default function GalleryPage({ params }: Props) {
     } catch {}
     setSessionLoaded(true)
   }, [])
+
+  // ---- Получаем актуальный reveal_at/status с сервера при монтировании --
+
+  useEffect(() => {
+    if (!session?.short_code) return
+    fetchPublicEvent(session.short_code).then(data => {
+      if (data) {
+        setLiveRevealAt(data.reveal_at)
+        setLiveStatus(data.status)
+      } else {
+        // Fallback: используем значение из сессии
+        setLiveRevealAt(session.reveal_at)
+        setLiveStatus(null)
+      }
+    })
+  }, [session])
 
   // ---- Загрузка кадров --------------------------------------------------
 
@@ -526,14 +583,32 @@ export default function GalleryPage({ params }: Props) {
   // Константа с уже проверенной сессией — для безопасного использования в замыканиях
   const activeSession: GuestSession = session
 
-  const revealed = isRevealed(activeSession.reveal_at)
-  const revealLabel = activeSession.reveal_at && !revealed
-    ? formatRevealTime(activeSession.reveal_at)
+  // Берём reveal_at из серверного ответа; если ещё не загрузился — из сессии (undefined → null)
+  const effectiveRevealAt = liveRevealAt !== undefined ? liveRevealAt : activeSession.reveal_at
+  const effectiveStatus = liveStatus !== undefined ? liveStatus : null
+
+  const revealed = checkIsRevealed(effectiveRevealAt, effectiveStatus)
+  const revealLabel = effectiveRevealAt && !revealed
+    ? formatRevealTime(effectiveRevealAt)
     : null
 
   const currentPhotos = activeTab === 'mine' ? myPhotos : allPhotos
   const currentLoading = activeTab === 'mine' ? loadingMine : loadingAll
   const currentError = activeTab === 'mine' ? errorMine : errorAll
+
+  // При обновлении также обновляем данные события с сервера
+  function handleRefresh() {
+    if (activeSession.short_code) {
+      fetchPublicEvent(activeSession.short_code).then(data => {
+        if (data) {
+          setLiveRevealAt(data.reveal_at)
+          setLiveStatus(data.status)
+        }
+      })
+    }
+    if (activeTab === 'mine') loadMine(activeSession)
+    else loadAll(activeSession)
+  }
 
   return (
     <main style={PS.page}>
@@ -610,10 +685,7 @@ export default function GalleryPage({ params }: Props) {
             <span>{currentError}</span>
             <button
               style={PS.retryBtn}
-              onClick={() => {
-                if (activeTab === 'mine') loadMine(activeSession)
-                else loadAll(activeSession)
-              }}
+              onClick={handleRefresh}
             >
               Обновить
             </button>
