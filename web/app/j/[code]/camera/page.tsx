@@ -1,7 +1,7 @@
 'use client'
 
 /**
- * Экран камеры — SPECIFICATION §8.2
+ * Экран камеры — SPECIFICATION §8.2, §9 п.3
  * Реальная камера: getUserMedia, плёночный фильтр (applyFilter), загрузка кадров.
  *
  * Инварианты:
@@ -52,6 +52,18 @@ function getShotsWord(n: number): string {
   if (last === 1) return 'кадр остался'
   if (last >= 2 && last <= 4) return 'кадра осталось'
   return 'кадров осталось'
+}
+
+/**
+ * Форматирует ISO-дату в «HH:MM DD.MM» — единый формат приложения.
+ */
+function formatStartsAt(iso: string): string {
+  const d = new Date(iso)
+  const hh = d.getHours().toString().padStart(2, '0')
+  const mm = d.getMinutes().toString().padStart(2, '0')
+  const dd = d.getDate().toString().padStart(2, '0')
+  const mo = (d.getMonth() + 1).toString().padStart(2, '0')
+  return `${hh}:${mm} ${dd}.${mo}`
 }
 
 // ---- Стили ---------------------------------------------------------------
@@ -181,6 +193,20 @@ const S: Record<string, CSSProperties> = {
     transform: 'translateX(-50%)',
     background: 'rgba(192,57,43,0.9)',
     color: '#fff',
+    borderRadius: 8,
+    padding: '10px 20px',
+    fontSize: '0.85rem',
+    fontWeight: 600,
+    whiteSpace: 'nowrap',
+    zIndex: 5,
+  },
+  notStartedBanner: {
+    position: 'absolute',
+    bottom: 16,
+    left: '50%',
+    transform: 'translateX(-50%)',
+    background: 'rgba(212,168,83,0.9)',
+    color: '#111010',
     borderRadius: 8,
     padding: '10px 20px',
     fontSize: '0.85rem',
@@ -342,6 +368,9 @@ export default function CameraPage({ params }: Props) {
   const [toastMsg, setToastMsg] = useState<string | null>(null)
   const [shotsExhausted, setShotsExhausted] = useState(false)
 
+  // Флаг «событие ещё не началось» (§9 п.3) — вычисляем при монтировании и при попытке съёмки
+  const [notStarted, setNotStarted] = useState(false)
+
   // ---- Загрузка сессии --------------------------------------------------
 
   useEffect(() => {
@@ -351,6 +380,10 @@ export default function CameraPage({ params }: Props) {
         const s = JSON.parse(raw) as GuestSession
         setSession(s)
         setShotsExhausted(s.shots_left === 0)
+        // Проверяем starts_at при монтировании
+        if (s.starts_at && new Date(s.starts_at) > new Date()) {
+          setNotStarted(true)
+        }
       }
     } catch {
       // sessionStorage недоступен
@@ -458,12 +491,28 @@ export default function CameraPage({ params }: Props) {
     pendingUploadRef.current = null
   }
 
+  // ---- Проверка starts_at перед попыткой съёмки --------------------------
+
+  function checkNotStarted(): boolean {
+    if (!session?.starts_at) return false
+    if (new Date(session.starts_at) > new Date()) {
+      setNotStarted(true)
+      return true
+    }
+    // Событие уже стартовало — сбрасываем флаг если был выставлен
+    if (notStarted) setNotStarted(false)
+    return false
+  }
+
   // ---- Захват кадра -------------------------------------------------------
 
   async function handleCapture() {
     if (!session || !videoRef.current || !cameraReady) return
     if (shotsExhausted) return
     if (phase !== 'idle') return
+
+    // Проверяем, началось ли событие (§9 п.3)
+    if (checkNotStarted()) return
 
     setPhase('capturing')
     setUploadError(null)
@@ -509,6 +558,14 @@ export default function CameraPage({ params }: Props) {
           clearPreview(pUrl)
           return
         }
+        // Событие ещё не началось (§9 п.3) — показываем понятное сообщение
+        if (urlResult.code === 'event_not_started') {
+          setNotStarted(true)
+          setUploadError('Событие ещё не началось. Съёмка откроется в момент старта.')
+          setPhase('idle')
+          clearPreview(pUrl)
+          return
+        }
         setUploadError(urlResult.message)
         setPhase('idle')
         clearPreview(pUrl)
@@ -550,11 +607,19 @@ export default function CameraPage({ params }: Props) {
     }
 
     const confirmResult = await confirmUpload(photo_id)
+
     if (!confirmResult.ok) {
-      setUploadError('Кадр загружен, но подтверждение не прошло. Он появится позже.')
+      // ФИКС: при ошибке confirm НЕ уменьшаем счётчик, НЕ очищаем pendingUpload,
+      // возвращаем в preview чтобы гость мог повторить «Загрузить».
+      const msg = confirmResult.code === 'not_uploaded'
+        ? 'Файл не долетел до сервера, попробуйте снова.'
+        : 'Не удалось подтвердить загрузку. Попробуйте ещё раз.'
+      setUploadError(msg)
+      setPhase('preview')
+      return
     }
 
-    // Уменьшаем счётчик
+    // Уменьшаем счётчик ТОЛЬКО при успешном confirm
     const newShotsLeft = session.shots_left >= 1_000_000
       ? session.shots_left
       : Math.max(0, session.shots_left - 1)
@@ -570,7 +635,7 @@ export default function CameraPage({ params }: Props) {
     if (currentPUrl) URL.revokeObjectURL(currentPUrl)
 
     setPhase('idle')
-    if (confirmResult.ok) showToast('Кадр загружен!')
+    showToast('Кадр загружен!')
   }
 
   // ---- Переснять ----------------------------------------------------------
@@ -615,7 +680,11 @@ export default function CameraPage({ params }: Props) {
   const isCapturing = phase === 'capturing'
   const isPreview = phase === 'preview'
   const isUploading = phase === 'uploading'
-  const canShoot = cameraReady && !shotsExhausted && phase === 'idle'
+  // Кнопка съёмки заблокирована также если событие ещё не началось
+  const canShoot = cameraReady && !shotsExhausted && !notStarted && phase === 'idle'
+
+  // Форматированное время старта для плашки в видоискателе
+  const notStartedLabel = session.starts_at ? formatStartsAt(session.starts_at) : null
 
   return (
     <main style={S.page}>
@@ -689,6 +758,15 @@ export default function CameraPage({ params }: Props) {
             Кадры закончились. Спасибо за участие!
           </div>
         )}
+
+        {/* Плашка «событие ещё не началось» (§9 п.3) */}
+        {notStarted && !shotsExhausted && !cameraError && !isPreview && (
+          <div style={S.notStartedBanner}>
+            {notStartedLabel
+              ? `Съёмка откроется в ${notStartedLabel}`
+              : 'Событие ещё не началось'}
+          </div>
+        )}
       </div>
 
       {/* Ошибка загрузки */}
@@ -722,6 +800,10 @@ export default function CameraPage({ params }: Props) {
             title={
               shotsExhausted
                 ? 'Кадры закончились'
+                : notStarted
+                ? notStartedLabel
+                  ? `Съёмка откроется в ${notStartedLabel}`
+                  : 'Событие ещё не началось'
                 : !cameraReady
                 ? 'Камера инициализируется...'
                 : 'Снять кадр'

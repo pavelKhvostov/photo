@@ -1,5 +1,5 @@
 /**
- * Лендинг события — SPECIFICATION §8.2, §6.2.
+ * Лендинг события — SPECIFICATION §8.2, §6.2, §9 п.3.
  *
  * Получает публичные данные события через Edge Function public-event
  * (GET /functions/v1/public-event?short_code=...).
@@ -21,6 +21,7 @@ interface PublicEvent {
   camera_style: string
   status: string
   reveal_at: string | null
+  starts_at: string | null  // ISO timestamp или null — когда начинается съёмка (§9 п.3)
 }
 
 type EventResult =
@@ -32,6 +33,18 @@ const STYLE_LABELS: Record<string, string> = {
   vintage: 'Винтаж',
   bw:      'Ч/Б',
   summer:  'Лето',
+}
+
+/**
+ * Форматирует ISO-дату в «HH:MM DD.MM» — единый формат для всего приложения.
+ */
+function formatStartsAt(iso: string): string {
+  const d = new Date(iso)
+  const hh = d.getHours().toString().padStart(2, '0')
+  const mm = d.getMinutes().toString().padStart(2, '0')
+  const dd = d.getDate().toString().padStart(2, '0')
+  const mo = (d.getMonth() + 1).toString().padStart(2, '0')
+  return `${hh}:${mm} ${dd}.${mo}`
 }
 
 async function fetchPublicEvent(shortCode: string): Promise<EventResult> {
@@ -160,6 +173,12 @@ export default async function EventLandingPage({ params }: Props) {
     )
   }
 
+  // Проверяем, не началось ли ещё событие (§9 п.3). Серверный рендер — Date.now() актуален.
+  const notStartedYet =
+    event.starts_at !== null && new Date(event.starts_at) > new Date()
+
+  const startsAtFormatted = event.starts_at ? formatStartsAt(event.starts_at) : null
+
   return (
     <main className="page" style={{ justifyContent: 'center' }}>
       <div className="card">
@@ -205,6 +224,38 @@ export default async function EventLandingPage({ params }: Props) {
             </p>
           </div>
 
+          {/* Баннер «Событие ещё не началось» (§9 п.3) */}
+          {notStartedYet && startsAtFormatted && (
+            <div
+              style={{
+                background: 'rgba(212,168,83,0.12)',
+                border: '1px solid rgba(212,168,83,0.4)',
+                borderRadius: 'var(--radius)',
+                padding: '14px 16px',
+                textAlign: 'center',
+              }}
+            >
+              <p
+                style={{
+                  fontSize: '0.9rem',
+                  color: 'var(--accent)',
+                  fontWeight: 600,
+                  marginBottom: '4px',
+                }}
+              >
+                Событие начнётся: {startsAtFormatted}
+              </p>
+              <p
+                style={{
+                  fontSize: '0.8rem',
+                  color: 'var(--text-muted)',
+                }}
+              >
+                Вы можете присоединиться сейчас — съёмка откроется в момент старта.
+              </p>
+            </div>
+          )}
+
           {/* Объяснение сервиса */}
           <div
             style={{
@@ -228,13 +279,15 @@ export default async function EventLandingPage({ params }: Props) {
             </p>
           </div>
 
-          {/* CTA */}
+          {/* CTA — кнопка присоединиться всегда доступна (гость заходит и ждёт) */}
           <Link href={`/j/${code}/join`} className="btn-primary">
             Присоединиться
           </Link>
 
           <p className="text-muted text-center" style={{ fontSize: '0.8rem' }}>
-            Нажимая «Присоединиться», вы перейдёте к форме согласия
+            {notStartedYet
+              ? 'Вы перейдёте к форме согласия; съёмка откроется в момент старта'
+              : 'Нажимая «Присоединиться», вы перейдёте к форме согласия'}
           </p>
         </div>
       </div>

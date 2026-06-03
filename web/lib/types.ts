@@ -21,6 +21,7 @@ export interface JoinEventResponse {
   shots_left: number        // 1_000_000 = безлимит (из плана 'wedding'/'unlimited' с shots_per_guest=0)
   reveal_at: string | null  // ISO timestamp или null = мгновенный показ
   camera_style: CameraStyle
+  starts_at: string | null  // ISO timestamp или null — когда начинается съёмка
 }
 
 // Формат ошибки API (SPECIFICATION §6 конвенции)
@@ -39,6 +40,7 @@ export interface GuestSession {
   reveal_at: string | null
   camera_style: CameraStyle
   short_code: string
+  starts_at: string | null  // ISO timestamp или null — когда начинается съёмка
 }
 
 // Ключ для sessionStorage

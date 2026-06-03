@@ -1,5 +1,5 @@
 // Edge Function: upload-url — выдача подписанного PUT-URL для загрузки кадра.
-// Контракт: SPECIFICATION.md §6.3 («Запрос URL на загрузку»), §5 (Storage).
+// Контракт: SPECIFICATION.md §6.3 («Запрос URL на загрузку»), §5 (Storage), §9 п.3.
 //
 // POST (концептуально POST /events/:id/photos/upload-url), авторизация — JWT гостя.
 // Тело: { "event_id": "...", "filter": "vintage", "width": 1536, "height": 2048 }.
@@ -7,6 +7,8 @@
 //
 // Функция работает под service-role (обходит RLS) и сама проверяет права/лимиты:
 //  - права гостя из anon-JWT (auth.getUser);
+//  - съёмка закрыта до events.starts_at (§9 п.3): если starts_at в будущем → 409
+//    event_not_started (null = ограничения нет, старт сразу);
 //  - лимит кадров считается ДО выдачи URL по uploaded-фото и events.shots_per_guest
 //    (безлимит, если plans.shots_per_guest == 0 для events.plan);
 //  - Storage отдаётся только подписанным URL (152-ФЗ инвариант), бакет приватный.
@@ -116,7 +118,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
   // 4. Событие и его статус.
   const { data: event, error: eventErr } = await supabase
     .from("events")
-    .select("id, status, plan, shots_per_guest")
+    .select("id, status, plan, shots_per_guest, starts_at")
     .eq("id", eventId)
     .maybeSingle();
   if (eventErr) {
@@ -127,6 +129,14 @@ Deno.serve(async (req: Request): Promise<Response> => {
   }
   if (event.status === "archived" || event.status === "deleted") {
     return jsonError("event_closed", "Событие закрыто.", 410);
+  }
+
+  // 4a. Съёмка закрыта до старта события (§9 п.3). starts_at == null → старт сразу.
+  if (
+    event.starts_at !== null &&
+    new Date(event.starts_at).getTime() > Date.now()
+  ) {
+    return jsonError("event_not_started", "Событие ещё не началось.", 409);
   }
 
   // 5. Лимит кадров. Безлимит, если plans.shots_per_guest == 0 для плана события.

@@ -105,7 +105,7 @@ export default function JoinPage({ params }: Props) {
       return
     }
 
-    // Успех — сохраняем данные гостя в sessionStorage
+    // Успех — сохраняем данные гостя в sessionStorage (включая starts_at)
     const session: GuestSession = {
       guest_id: result.data.guest_id,
       event_id: result.data.event_id,
@@ -113,6 +113,7 @@ export default function JoinPage({ params }: Props) {
       reveal_at: result.data.reveal_at,
       camera_style: result.data.camera_style,
       short_code: code,
+      starts_at: result.data.starts_at ?? null,
     }
     try {
       sessionStorage.setItem(GUEST_SESSION_KEY, JSON.stringify(session))

@@ -7,10 +7,16 @@
 //
 // Функция работает под service-role (обходит RLS) и сама проверяет, что кадр
 // принадлежит гостю текущей сессии. Идемпотентно ставит uploaded=true.
+//
+// БАГ-ФИКС (HIGH §6.3): нельзя подтверждать кадр, файла которого нет в Storage.
+// До update проверяем наличие объекта по storage_path; если объекта нет — 409
+// not_uploaded. Это исключает фантомные записи и битые карточки в галерее.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { handlePreflight } from "../_shared/cors.ts";
 import { jsonError, jsonOk } from "../_shared/errors.ts";
+
+const BUCKET = "event-photos";
 
 interface ConfirmBody {
   photo_id?: unknown;
@@ -61,7 +67,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   const { data: photo, error: photoErr } = await supabase
     .from("photos")
-    .select("id, event_id, guest_id")
+    .select("id, event_id, guest_id, storage_path")
     .eq("id", photoId)
     .maybeSingle();
   if (photoErr) {
@@ -85,11 +91,31 @@ Deno.serve(async (req: Request): Promise<Response> => {
     return jsonError("forbidden", "Кадр принадлежит другому гостю.", 403);
   }
 
-  // 4. TODO: генерация превью (512 px, {photo_id}_thumb.jpg) — будущая версия /
+  // 4. Объект ДОЛЖЕН реально присутствовать в Storage до подтверждения (§6.3).
+  // storage_path = {event_id}/{guest_id}/{photo_id}.jpg — разбираем на каталог и
+  // имя файла, ищем точное совпадение через list(search). Нет объекта → 409.
+  const storagePath = (photo.storage_path as string | null) ?? "";
+  const slash = storagePath.lastIndexOf("/");
+  const folder = slash >= 0 ? storagePath.slice(0, slash) : "";
+  const filename = slash >= 0 ? storagePath.slice(slash + 1) : storagePath;
+
+  const { data: listed, error: listErr } = await supabase.storage
+    .from(BUCKET)
+    .list(folder, { search: filename });
+  if (listErr) {
+    return jsonError("server_error", "Ошибка проверки хранилища.", 500);
+  }
+  const exists = (listed ?? []).some((o) => o.name === filename);
+  if (!exists) {
+    return jsonError("not_uploaded", "Файл ещё не загружен в хранилище.", 409);
+  }
+
+  // 5. TODO: генерация превью (512 px, {photo_id}_thumb.jpg) — будущая версия /
   // Storage transform (SPECIFICATION §5). В этой фазе превью не создаём,
   // thumb_ready=false. Никакого распознавания лиц (инвариант проекта).
 
-  // 5. Идемпотентно помечаем кадр загруженным (повтор — no-op).
+  // 6. Идемпотентно помечаем кадр загруженным (повтор уже загруженного — no-op:
+  // объект на месте, uploaded уже true → снова 200).
   const { error: updErr } = await supabase
     .from("photos")
     .update({ uploaded: true })

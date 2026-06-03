@@ -11,6 +11,10 @@
 //  - чужое фото видно только после проявки (reveal_at null/прошёл или status='revealed');
 //  - посторонний (не хост/не гость) — forbidden.
 // Фото отдаётся ТОЛЬКО подписанным URL с TTL (152-ФЗ инвариант), бакет приватный.
+//
+// БАГ-ФИКС (HIGH §6.3): незагруженный кадр (uploaded=false) не имеет объекта в
+// Storage — выдавать на него URL нельзя (битая картинка). Возвращаем 404
+// not_found, как будто кадра нет (не раскрываем существование резерва).
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { handlePreflight } from "../_shared/cors.ts";
@@ -72,13 +76,19 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   const { data: photo, error: photoErr } = await supabase
     .from("photos")
-    .select("id, event_id, guest_id, storage_path")
+    .select("id, event_id, guest_id, storage_path, uploaded")
     .eq("id", photoId)
     .maybeSingle();
   if (photoErr) {
     return jsonError("server_error", "Ошибка чтения кадра.", 500);
   }
   if (!photo) {
+    return jsonError("not_found", "Кадр не найден.", 404);
+  }
+
+  // 2a. Незагруженный кадр (резерв) — для всех = «не найден» (§6.3). Объекта в
+  // Storage ещё нет, выдача URL дала бы битую картинку.
+  if (photo.uploaded !== true) {
     return jsonError("not_found", "Кадр не найден.", 404);
   }
 

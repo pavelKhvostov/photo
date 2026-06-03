@@ -1,5 +1,5 @@
 // Edge Function: join-event — вступление гостя в событие.
-// Контракт: SPECIFICATION.md §6.3 («Вступление гостя»), edge cases §9 п.2, п.6.
+// Контракт: SPECIFICATION.md §6.3 («Вступление гостя»), edge cases §9 п.2, п.3, п.6.
 //
 // POST (концептуально POST /events/:short_code/join), авторизация — анонимный JWT гостя.
 // short_code принимаем из тела запроса, чтобы не зависеть от роутинга путей.
@@ -8,13 +8,18 @@
 //   { "short_code": "k7p2qx", "display_name": "Дима",
 //     "consent": { "policy_version": "2026-06-01", "purpose": "photo_upload" } }
 // Успех 201 (новый) / 200 (идемпотентный повтор):
-//   { "guest_id", "event_id", "shots_left", "reveal_at" | null, "camera_style" }
+//   { "guest_id", "event_id", "shots_left", "reveal_at" | null,
+//     "starts_at" | null, "camera_style" }
 //
 // Функция работает под service-role (обходит RLS) и сама проверяет права/лимиты:
 //  - права гостя извлекаются из anon-JWT (auth.getUser);
 //  - consent пишется ДО создания гостя (152-ФЗ: IP/UA из заголовков);
 //  - лимит гостей берётся из таблицы plans (не хардкод);
 //  - идемпотентность по (event_id, auth_uid).
+//
+// СТАРТ СОБЫТИЯ (§9 п.3): вступление ДО starts_at РАЗРЕШЕНО — гость может зайти на
+// лендинг и ждать. В ответ кладём starts_at (или null), чтобы клиент блокировал
+// съёмку и показывал отсчёт. Серверный запрет съёмки — в upload-url.
 //
 // АТОМАРНОСТЬ ЛИМИТА (QA HIGH): подсчёт гостей и insert нового выполняются в одной
 // security-definer RPC join_guest_atomic под транзакционным advisory-lock по event_id
@@ -132,7 +137,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
   // 3. Поиск события по short_code.
   const { data: event, error: eventErr } = await supabase
     .from("events")
-    .select("id, status, plan, shots_per_guest, reveal_at, camera_style")
+    .select("id, status, plan, shots_per_guest, reveal_at, starts_at, camera_style")
     .eq("short_code", shortCode)
     .maybeSingle();
 
@@ -257,6 +262,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
       event_id: event.id,
       shots_left: shotsLeft,
       reveal_at: event.reveal_at ?? null,
+      starts_at: event.starts_at ?? null,
       camera_style: event.camera_style,
     }, 200);
   };
@@ -344,6 +350,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
     event_id: event.id,
     shots_left: shotsLeft,
     reveal_at: event.reveal_at ?? null,
+    starts_at: event.starts_at ?? null,
     camera_style: event.camera_style,
   }, 201);
 });
