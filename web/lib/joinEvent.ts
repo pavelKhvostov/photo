@@ -17,22 +17,60 @@ export type JoinResult =
  * SPECIFICATION §6.3: идемпотентно по (event_id, auth_uid).
  */
 export async function joinEvent(req: JoinEventRequest): Promise<JoinResult> {
-  // Шаг 1: получаем анонимную сессию (или используем существующую)
-  let accessToken: string
+  // Шаг 1: получаем анонимную сессию.
+  // Сначала пробуем уже существующую (если гость вернулся), иначе создаём новую.
+  // Анонимный вход делаем ПРЯМЫМ fetch на /auth/v1/signup, а не через supabase-js
+  // signInAnonymously — так устойчивее (меньше зависимости от внутренней session-
+  // логики клиента) и работает с любого устройства/origin.
+  let accessToken = ''
 
-  const { data: sessionData } = await supabase.auth.getSession()
-  if (sessionData.session?.access_token) {
-    accessToken = sessionData.session.access_token
-  } else {
-    const { data: anonData, error: anonError } = await supabase.auth.signInAnonymously()
-    if (anonError || !anonData.session) {
+  try {
+    const { data: sessionData } = await supabase.auth.getSession()
+    if (sessionData.session?.access_token) {
+      accessToken = sessionData.session.access_token
+    }
+  } catch {
+    // нет сохранённой сессии — создадим новую ниже
+  }
+
+  if (!accessToken) {
+    try {
+      const anonResp = await fetch(`${SUPABASE_URL}/auth/v1/signup`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'apikey': SUPABASE_ANON_KEY,
+        },
+        body: JSON.stringify({}),
+      })
+      const anonBody = await anonResp.json().catch(() => null) as
+        | { access_token?: string; refresh_token?: string; error_code?: string; msg?: string }
+        | null
+      if (!anonResp.ok || !anonBody?.access_token) {
+        // Частая причина: исчерпан лимит анонимных входов с одного IP (rate limit).
+        const code = anonBody?.error_code === 'over_request_rate_limit'
+          ? 'rate_limited'
+          : 'auth_error'
+        const message = code === 'rate_limited'
+          ? 'Слишком много входов. Подождите минуту и попробуйте снова.'
+          : 'Не удалось создать сессию. Проверьте соединение и попробуйте ещё раз.'
+        return { ok: false, code, message }
+      }
+      accessToken = anonBody.access_token
+      // Сохраняем сессию в supabase-js, чтобы повторные действия (галерея) её видели.
+      if (anonBody.refresh_token) {
+        await supabase.auth.setSession({
+          access_token: anonBody.access_token,
+          refresh_token: anonBody.refresh_token,
+        }).catch(() => {})
+      }
+    } catch {
       return {
         ok: false,
-        code: 'auth_error',
-        message: 'Не удалось создать анонимную сессию. Попробуйте ещё раз.',
+        code: 'network_error',
+        message: 'Нет соединения с сервером. Проверьте интернет и попробуйте снова.',
       }
     }
-    accessToken = anonData.session.access_token
   }
 
   // Шаг 2: вызываем Edge Function join-event.

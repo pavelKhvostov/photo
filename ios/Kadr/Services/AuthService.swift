@@ -41,6 +41,18 @@ final class AuthService {
         applyJWT(AppConfig.hostJWT)
     }
 
+    /// Локальный демо-вход: анонимная сессия Supabase в роли хоста.
+    /// Получает валидный токен через signInAnonymously (create-event работает).
+    func loginAnonymouslyForDemo() async {
+        do {
+            let jwt = try await APIClient.shared.signInAnonymously()
+            applyJWT(jwt)
+            errorMessage = nil
+        } catch {
+            errorMessage = (error as? KadrError)?.userMessage ?? error.localizedDescription
+        }
+    }
+
     // MARK: - OTP-вход (продакшн)
 
     /// Шаг 1: запросить OTP-код.

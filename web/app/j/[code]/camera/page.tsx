@@ -402,6 +402,17 @@ export default function CameraPage({ params }: Props) {
       streamRef.current = null
     }
 
+    // Браузер даёт доступ к камере только в защищённом контексте (HTTPS или localhost).
+    // По http://<IP> getUserMedia заблокирован — объясняем это явно, без пугающей ошибки.
+    if (!window.isSecureContext) {
+      setCameraError(
+        'Съёмка доступна только по защищённому соединению (HTTPS). ' +
+        'На рабочем событии это домен kadr.ru. Сейчас вы открыли тестовую ссылку по незащищённому адресу — ' +
+        'вступление и галерея работают, а камеру можно открыть на устройстве с защищённым доступом.'
+      )
+      return
+    }
+
     if (!navigator.mediaDevices?.getUserMedia) {
       setCameraError('Камера не поддерживается этим браузером.')
       return

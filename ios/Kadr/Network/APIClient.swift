@@ -193,12 +193,37 @@ final class APIClient {
         let response: OTPVerifyResponse = try await perform(request)
         return response.jwt
     }
+
+    /// Локальный демо-вход: анонимная сессия Supabase в роли хоста.
+    /// POST /auth/v1/signup (пустое тело) → { access_token }. Токен валиден
+    /// для create-event и др. На проде заменяется на телефон+OTP.
+    func signInAnonymously() async throws -> String {
+        guard let url = URL(string: AppConfig.baseURL + "/auth/v1/signup") else {
+            throw KadrError.unknown
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue(AppConfig.anonKey, forHTTPHeaderField: "apikey")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = Data("{}".utf8)
+        let response: AnonSessionResponse = try await perform(request)
+        return response.accessToken
+    }
 }
 
 // MARK: - OTPVerifyResponse
 
 private struct OTPVerifyResponse: Decodable {
     let jwt: String
+}
+
+// MARK: - AnonSessionResponse
+
+private struct AnonSessionResponse: Decodable {
+    let accessToken: String
+    enum CodingKeys: String, CodingKey {
+        case accessToken = "access_token"
+    }
 }
 
 // MARK: - ISO8601DateFormatter helpers

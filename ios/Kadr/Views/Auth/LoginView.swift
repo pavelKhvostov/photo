@@ -59,8 +59,8 @@ struct LoginView: View {
     @ViewBuilder
     private var formSection: some View {
         VStack(spacing: 16) {
-            // Поле телефона — показываем только в OTP-режиме или когда hostJWT пуст
-            if AppConfig.hostJWT.isEmpty || otpSent {
+            // Поле телефона — только в OTP-режиме (не в демо-режиме)
+            if !AppConfig.useAnonymousHostLogin && (AppConfig.hostJWT.isEmpty || otpSent) {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Номер телефона")
                         .font(KadrTheme.captionFont)
@@ -135,6 +135,31 @@ struct LoginView: View {
     @ViewBuilder
     private var actionsSection: some View {
         VStack(spacing: 12) {
+            // Демо-вход: анонимная сессия в роли хоста (локальная разработка)
+            if AppConfig.useAnonymousHostLogin {
+                Button("Войти (демо)") {
+                    guard consentChecked else {
+                        errorMessage = "Необходимо согласиться с политикой обработки персональных данных."
+                        return
+                    }
+                    Task {
+                        isLoading = true
+                        errorMessage = nil
+                        await authService.loginAnonymouslyForDemo()
+                        isLoading = false
+                        errorMessage = authService.errorMessage
+                    }
+                }
+                .buttonStyle(AccentButtonStyle(isEnabled: consentChecked && !isLoading))
+                .disabled(!consentChecked || isLoading)
+
+                Text("Демо-режим (анонимный хост)")
+                    .font(KadrTheme.captionFont)
+                    .foregroundColor(KadrTheme.textDisabled)
+
+                if isLoading { KadrProgressView() }
+            }
+
             // Mock-кнопка (только если hostJWT задан в AppConfig)
             if !AppConfig.hostJWT.isEmpty {
                 Button("Войти с тестовым токеном") {
@@ -153,8 +178,8 @@ struct LoginView: View {
                     .foregroundColor(KadrTheme.textDisabled)
             }
 
-            // OTP-кнопки (если hostJWT пуст)
-            if AppConfig.hostJWT.isEmpty {
+            // OTP-кнопки (если hostJWT пуст и демо-режим выключен)
+            if AppConfig.hostJWT.isEmpty && !AppConfig.useAnonymousHostLogin {
                 if !otpSent {
                     Button("Получить код") {
                         Task { await sendOTP() }
