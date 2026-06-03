@@ -7,6 +7,8 @@
 --   2) Гость A ДО проявки видит только своё фото (1); чужое скрыто.
 --   3) Гость A ПОСЛЕ проявки видит оба фото (2).
 --   4) Гость A видит СВОЁ событие по short_code (регрессия events_guest_select).
+--   5) После retention-метки (status='deleted') фото НЕ видно ни хосту, ни гостю
+--      через PostgREST (152-ФЗ ст. 5; фикс M1 в migrations/0005).
 --
 -- Без pgTAP: чистый SQL + plpgsql DO-блоки. Провал → RAISE EXCEPTION (psql вернёт != 0).
 -- Самодостаточен: наполняет данные сам и ОТКАТЫВАЕТ их (BEGIN ... ROLLBACK).
@@ -217,6 +219,53 @@ begin
 
   reset role;
   raise notice 'CHECK 4 PASSED: joined guest sees own event by short_code (1 row)';
+end $$;
+reset role;
+
+-- ===========================================================================
+-- Retention-метка: под привилегированной ролью помечаем событие как 'deleted'
+-- (в проде это делает pg_cron kadr-retention-mark — см. migrations/0004 / SPEC §7).
+-- Событие СЕЙЧАС проявлено (revealed), фото uploaded — то есть БЕЗ фикса M1 оба
+-- кадра остались бы видимы через PostgREST. Проверяем, что 0005 их скрывает.
+-- ===========================================================================
+update public.events
+   set status = 'deleted'
+ where id = 'ef000000-0000-0000-0000-0000000000ee';
+
+-- ===========================================================================
+-- ПРОВЕРКА 5 — фото события со status='deleted' НЕ видно никому (фикс M1, 0005).
+-- 152-ФЗ ст. 5: после retention-метки и до физической чистки Storage кадры не
+-- должны отдаваться через PostgREST.
+-- ===========================================================================
+do $$
+declare
+  v_host_photos  int;
+  v_guest_photos int;
+begin
+  -- Хост deleted-события: 0 фото.
+  set local role authenticated;
+  set local request.jwt.claims =
+    '{"sub":"1f000000-0000-0000-0000-000000000001","role":"authenticated"}';
+  select count(*) into v_host_photos from public.photos
+   where event_id = 'ef000000-0000-0000-0000-0000000000ee';
+  reset role;
+
+  -- Гость A deleted-события (даже своё фото, даже после проявки): 0 фото.
+  set local role authenticated;
+  set local request.jwt.claims =
+    '{"sub":"2f000000-0000-0000-0000-000000000002","role":"authenticated"}';
+  select count(*) into v_guest_photos from public.photos
+   where event_id = 'ef000000-0000-0000-0000-0000000000ee';
+  reset role;
+
+  if v_host_photos <> 0 then
+    raise exception 'CHECK 5 FAILED: host must NOT see photos of deleted event, got %', v_host_photos;
+  end if;
+  if v_guest_photos <> 0 then
+    raise exception 'CHECK 5 FAILED: guest must NOT see photos of deleted event, got %', v_guest_photos;
+  end if;
+
+  raise notice 'CHECK 5 PASSED: deleted-event photos hidden from host and guest (M1)';
 end $$;
 reset role;
 
