@@ -34,3 +34,12 @@ supabase/.env
 
 # временные диагностические файлы
 web/lib/_tmptest/
+
+# ── iOS / Xcode ─────────────────────────────────────
+# .xcodeproj генерируется из project.yml через xcodegen — не коммитим
+ios/Kadr.xcodeproj/
+ios/*.xcworkspace/
+ios/build/
+ios/DerivedData/
+*.xcuserstate
+.swiftpm/
