@@ -14,7 +14,7 @@
 //  - Storage отдаётся только подписанным URL (152-ФЗ инвариант), бакет приватный.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { handlePreflight } from "../_shared/cors.ts";
+import { corsHeadersFor, handlePreflight } from "../_shared/cors.ts";
 import { jsonError, jsonOk } from "../_shared/errors.ts";
 
 const BUCKET = "event-photos";
@@ -42,21 +42,24 @@ Deno.serve(async (req: Request): Promise<Response> => {
   const preflight = handlePreflight(req);
   if (preflight) return preflight;
 
+  // M5: origin-зависимые CORS-заголовки (приватная выдача URL загрузки).
+  const cors = corsHeadersFor(req);
+
   if (req.method !== "POST") {
-    return jsonError("method_not_allowed", "Только POST.", 405);
+    return jsonError("method_not_allowed", "Только POST.", 405, cors);
   }
 
   // 1. Авторизация: JWT гостя.
   const authHeader = req.headers.get("Authorization") ?? "";
   const jwt = authHeader.replace(/^Bearer\s+/i, "").trim();
   if (!jwt) {
-    return jsonError("unauthorized", "Отсутствует Bearer-токен.", 401);
+    return jsonError("unauthorized", "Отсутствует Bearer-токен.", 401, cors);
   }
 
   const supabaseUrl = Deno.env.get("SUPABASE_URL");
   const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
   if (!supabaseUrl || !serviceKey) {
-    return jsonError("server_misconfigured", "Сервер не настроен.", 500);
+    return jsonError("server_misconfigured", "Сервер не настроен.", 500, cors);
   }
 
   const supabase = createClient(supabaseUrl, serviceKey, {
@@ -65,7 +68,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   const { data: userData, error: userErr } = await supabase.auth.getUser(jwt);
   if (userErr || !userData?.user) {
-    return jsonError("unauthorized", "Невалидный токен гостя.", 401);
+    return jsonError("unauthorized", "Невалидный токен гостя.", 401, cors);
   }
   const authUid = userData.user.id;
 
@@ -74,12 +77,12 @@ Deno.serve(async (req: Request): Promise<Response> => {
   try {
     body = await req.json() as UploadBody;
   } catch {
-    return jsonError("validation", "Тело запроса должно быть JSON.", 422);
+    return jsonError("validation", "Тело запроса должно быть JSON.", 422, cors);
   }
 
   const eventId = typeof body.event_id === "string" ? body.event_id.trim() : "";
   if (!eventId || !UUID_RE.test(eventId)) {
-    return jsonError("validation", "Поле event_id обязательно (uuid).", 422);
+    return jsonError("validation", "Поле event_id обязательно (uuid).", 422, cors);
   }
 
   const filter = typeof body.filter === "string" ? body.filter : "";
@@ -88,16 +91,17 @@ Deno.serve(async (req: Request): Promise<Response> => {
       "validation",
       `filter должен быть одним из: ${ALLOWED_FILTERS.join(", ")}.`,
       422,
+      cors,
     );
   }
 
   const width = parseDimension(body.width);
   if (!width.ok) {
-    return jsonError("validation", "width должен быть положительным int.", 422);
+    return jsonError("validation", "width должен быть положительным int.", 422, cors);
   }
   const height = parseDimension(body.height);
   if (!height.ok) {
-    return jsonError("validation", "height должен быть положительным int.", 422);
+    return jsonError("validation", "height должен быть положительным int.", 422, cors);
   }
 
   // 3. Гость текущей сессии в этом событии — по (event_id, auth_uid).
@@ -108,10 +112,10 @@ Deno.serve(async (req: Request): Promise<Response> => {
     .eq("auth_uid", authUid)
     .maybeSingle();
   if (guestErr) {
-    return jsonError("server_error", "Ошибка проверки гостя.", 500);
+    return jsonError("server_error", "Ошибка проверки гостя.", 500, cors);
   }
   if (!guest) {
-    return jsonError("not_guest", "Вы не гость этого события.", 403);
+    return jsonError("not_guest", "Вы не гость этого события.", 403, cors);
   }
   const guestId = guest.id as string;
 
@@ -122,13 +126,13 @@ Deno.serve(async (req: Request): Promise<Response> => {
     .eq("id", eventId)
     .maybeSingle();
   if (eventErr) {
-    return jsonError("server_error", "Ошибка чтения события.", 500);
+    return jsonError("server_error", "Ошибка чтения события.", 500, cors);
   }
   if (!event) {
-    return jsonError("not_guest", "Вы не гость этого события.", 403);
+    return jsonError("not_guest", "Вы не гость этого события.", 403, cors);
   }
   if (event.status === "archived" || event.status === "deleted") {
-    return jsonError("event_closed", "Событие закрыто.", 410);
+    return jsonError("event_closed", "Событие закрыто.", 410, cors);
   }
 
   // 4a. Съёмка закрыта до старта события (§9 п.3). starts_at == null → старт сразу.
@@ -136,7 +140,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
     event.starts_at !== null &&
     new Date(event.starts_at).getTime() > Date.now()
   ) {
-    return jsonError("event_not_started", "Событие ещё не началось.", 409);
+    return jsonError("event_not_started", "Событие ещё не началось.", 409, cors);
   }
 
   // 5. Лимит кадров. Безлимит, если plans.shots_per_guest == 0 для плана события.
@@ -146,7 +150,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
     .eq("code", event.plan)
     .maybeSingle();
   if (planErr || !plan) {
-    return jsonError("server_error", "Тариф события не найден.", 500);
+    return jsonError("server_error", "Тариф события не найден.", 500, cors);
   }
 
   const unlimited = plan.shots_per_guest === 0;
@@ -157,7 +161,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
       .eq("guest_id", guestId)
       .eq("uploaded", true);
     if (countErr) {
-      return jsonError("server_error", "Ошибка подсчёта кадров.", 500);
+      return jsonError("server_error", "Ошибка подсчёта кадров.", 500, cors);
     }
     const uploaded = count ?? 0;
     if (uploaded >= event.shots_per_guest) {
@@ -165,6 +169,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
         "shot_limit_reached",
         "Достигнут лимит кадров по тарифу события.",
         409,
+        cors,
       );
     }
   }
@@ -187,7 +192,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
       uploaded: false,
     });
   if (insErr) {
-    return jsonError("server_error", "Не удалось создать кадр.", 500);
+    return jsonError("server_error", "Не удалось создать кадр.", 500, cors);
   }
 
   // 8. Подписанный PUT-URL (приватный бакет, 152-ФЗ). token нужен клиенту для
@@ -199,7 +204,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
   if (signErr || !signed) {
     // Откатываем резерв кадра, чтобы он не занимал лимит.
     await supabase.from("photos").delete().eq("id", photoId);
-    return jsonError("server_error", "Не удалось выдать URL загрузки.", 500);
+    return jsonError("server_error", "Не удалось выдать URL загрузки.", 500, cors);
   }
 
   return jsonOk({
@@ -208,5 +213,5 @@ Deno.serve(async (req: Request): Promise<Response> => {
     token: signed.token,
     storage_path: storagePath,
     expires_in: 600,
-  }, 200);
+  }, 200, cors);
 });

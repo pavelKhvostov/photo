@@ -17,8 +17,9 @@
 //    (152-ФЗ инвариант: публичных бакетов нет).
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { handlePreflight } from "../_shared/cors.ts";
+import { corsHeadersFor, handlePreflight } from "../_shared/cors.ts";
 import { jsonError, jsonOk } from "../_shared/errors.ts";
+import { toPublicUrl } from "../_shared/storage.ts";
 
 const BUCKET = "event-photos";
 const TTL = 600;
@@ -57,24 +58,6 @@ function genShortCode(): string {
   return out;
 }
 
-// На локалке Storage подписывает URL внутренним хостом Docker-сети (http://kong:8000),
-// который не резолвится из браузера. Подменяем origin на публичный. На проде — no-op.
-// (Скопировано из photo-url для единообразия выдачи подписанных URL.)
-function toPublicUrl(signedUrl: string): string {
-  const publicBase = Deno.env.get("PUBLIC_STORAGE_URL") ??
-    Deno.env.get("PUBLIC_SUPABASE_URL") ??
-    "http://127.0.0.1:54321";
-  try {
-    const u = new URL(signedUrl);
-    const pub = new URL(publicBase);
-    u.protocol = pub.protocol;
-    u.host = pub.host;
-    return u.toString();
-  } catch {
-    return signedUrl;
-  }
-}
-
 // Генерация QR PNG. Изолируем сбой рендера: при любой ошибке возвращаем null, чтобы
 // не сорвать создание события (join_url отдаём всегда).
 async function renderQrPng(text: string): Promise<Uint8Array | null> {
@@ -101,21 +84,24 @@ Deno.serve(async (req: Request): Promise<Response> => {
   const preflight = handlePreflight(req);
   if (preflight) return preflight;
 
+  // M5: origin-зависимые CORS-заголовки.
+  const cors = corsHeadersFor(req);
+
   if (req.method !== "POST") {
-    return jsonError("method_not_allowed", "Только POST.", 405);
+    return jsonError("method_not_allowed", "Только POST.", 405, cors);
   }
 
   // 1. Авторизация: JWT хоста.
   const authHeader = req.headers.get("Authorization") ?? "";
   const jwt = authHeader.replace(/^Bearer\s+/i, "").trim();
   if (!jwt) {
-    return jsonError("unauthorized", "Отсутствует Bearer-токен.", 401);
+    return jsonError("unauthorized", "Отсутствует Bearer-токен.", 401, cors);
   }
 
   const supabaseUrl = Deno.env.get("SUPABASE_URL");
   const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
   if (!supabaseUrl || !serviceKey) {
-    return jsonError("server_misconfigured", "Сервер не настроен.", 500);
+    return jsonError("server_misconfigured", "Сервер не настроен.", 500, cors);
   }
 
   const supabase = createClient(supabaseUrl, serviceKey, {
@@ -124,7 +110,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   const { data: userData, error: userErr } = await supabase.auth.getUser(jwt);
   if (userErr || !userData?.user) {
-    return jsonError("unauthorized", "Невалидный токен хоста.", 401);
+    return jsonError("unauthorized", "Невалидный токен хоста.", 401, cors);
   }
   const authUid = userData.user.id;
 
@@ -133,12 +119,12 @@ Deno.serve(async (req: Request): Promise<Response> => {
   try {
     body = await req.json() as CreateBody;
   } catch {
-    return jsonError("validation", "Тело запроса должно быть JSON.", 422);
+    return jsonError("validation", "Тело запроса должно быть JSON.", 422, cors);
   }
 
   const title = typeof body.title === "string" ? body.title.trim() : "";
   if (title.length < 1 || title.length > 120) {
-    return jsonError("validation", "title должен быть от 1 до 120 символов.", 422);
+    return jsonError("validation", "title должен быть от 1 до 120 символов.", 422, cors);
   }
 
   const cameraStyle = typeof body.camera_style === "string"
@@ -149,6 +135,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
       "validation",
       `camera_style должен быть одним из: ${ALLOWED_STYLES.join(", ")}.`,
       422,
+      cors,
     );
   }
 
@@ -164,6 +151,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
         "validation",
         "shots_per_guest должен быть int от 1 до 1000.",
         422,
+        cors,
       );
     }
     shotsPerGuest = body.shots_per_guest;
@@ -171,11 +159,11 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   const revealAt = parseIso(body.reveal_at);
   if (!revealAt.ok) {
-    return jsonError("validation", "reveal_at должен быть ISO-датой или null.", 422);
+    return jsonError("validation", "reveal_at должен быть ISO-датой или null.", 422, cors);
   }
   const startsAt = parseIso(body.starts_at);
   if (!startsAt.ok) {
-    return jsonError("validation", "starts_at должен быть ISO-датой или null.", 422);
+    return jsonError("validation", "starts_at должен быть ISO-датой или null.", 422, cors);
   }
 
   // 3. Профиль хоста в public.users. Триггера on auth.users тут нет, поэтому строку
@@ -203,7 +191,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
       { onConflict: "id", ignoreDuplicates: true },
     );
   if (profileErr) {
-    return jsonError("server_error", "Не удалось создать профиль хоста.", 500);
+    return jsonError("server_error", "Не удалось создать профиль хоста.", 500, cors);
   }
 
   // 4. План free: retention из таблицы plans (НЕ хардкод) → expires_at.
@@ -213,7 +201,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
     .eq("code", "free")
     .maybeSingle();
   if (planErr || !plan) {
-    return jsonError("server_error", "Тариф free не найден.", 500);
+    return jsonError("server_error", "Тариф free не найден.", 500, cors);
   }
   const expiresAt = new Date(
     Date.now() + plan.retention_days * 24 * 60 * 60 * 1000,
@@ -250,11 +238,11 @@ Deno.serve(async (req: Request): Promise<Response> => {
     // 23505 = unique_violation: коллизия short_code → пробуем снова.
     const code = (insErr as { code?: string } | null)?.code;
     if (code !== "23505") {
-      return jsonError("server_error", "Не удалось создать событие.", 500);
+      return jsonError("server_error", "Не удалось создать событие.", 500, cors);
     }
   }
   if (!created) {
-    return jsonError("server_error", "Не удалось подобрать short_code.", 500);
+    return jsonError("server_error", "Не удалось подобрать short_code.", 500, cors);
   }
 
   // 7. QR: join_url + рендер PNG в приватный бакет. Домен из env (на проде kadr.ru).
@@ -288,5 +276,5 @@ Deno.serve(async (req: Request): Promise<Response> => {
     qr_url: qrUrl,
     plan: "free",
     expires_at: created.expires_at,
-  }, 201);
+  }, 201, cors);
 });

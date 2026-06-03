@@ -11,7 +11,7 @@
 // удобнее отдавать явными кодами, поэтому проверяем сами.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { handlePreflight } from "../_shared/cors.ts";
+import { corsHeadersFor, handlePreflight } from "../_shared/cors.ts";
 import { jsonError, jsonOk } from "../_shared/errors.ts";
 
 const UUID_RE =
@@ -25,21 +25,24 @@ Deno.serve(async (req: Request): Promise<Response> => {
   const preflight = handlePreflight(req);
   if (preflight) return preflight;
 
+  // M5: origin-зависимые CORS-заголовки.
+  const cors = corsHeadersFor(req);
+
   if (req.method !== "POST") {
-    return jsonError("method_not_allowed", "Только POST.", 405);
+    return jsonError("method_not_allowed", "Только POST.", 405, cors);
   }
 
   // 1. Авторизация: JWT хоста.
   const authHeader = req.headers.get("Authorization") ?? "";
   const jwt = authHeader.replace(/^Bearer\s+/i, "").trim();
   if (!jwt) {
-    return jsonError("unauthorized", "Отсутствует Bearer-токен.", 401);
+    return jsonError("unauthorized", "Отсутствует Bearer-токен.", 401, cors);
   }
 
   const supabaseUrl = Deno.env.get("SUPABASE_URL");
   const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
   if (!supabaseUrl || !serviceKey) {
-    return jsonError("server_misconfigured", "Сервер не настроен.", 500);
+    return jsonError("server_misconfigured", "Сервер не настроен.", 500, cors);
   }
 
   const supabase = createClient(supabaseUrl, serviceKey, {
@@ -48,7 +51,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   const { data: userData, error: userErr } = await supabase.auth.getUser(jwt);
   if (userErr || !userData?.user) {
-    return jsonError("unauthorized", "Невалидный токен хоста.", 401);
+    return jsonError("unauthorized", "Невалидный токен хоста.", 401, cors);
   }
   const authUid = userData.user.id;
 
@@ -57,11 +60,11 @@ Deno.serve(async (req: Request): Promise<Response> => {
   try {
     body = await req.json() as RevealBody;
   } catch {
-    return jsonError("validation", "Тело запроса должно быть JSON.", 422);
+    return jsonError("validation", "Тело запроса должно быть JSON.", 422, cors);
   }
   const eventId = typeof body.event_id === "string" ? body.event_id.trim() : "";
   if (!eventId || !UUID_RE.test(eventId)) {
-    return jsonError("validation", "Поле event_id обязательно (uuid).", 422);
+    return jsonError("validation", "Поле event_id обязательно (uuid).", 422, cors);
   }
 
   // 2a. Поиск события.
@@ -71,25 +74,25 @@ Deno.serve(async (req: Request): Promise<Response> => {
     .eq("id", eventId)
     .maybeSingle();
   if (eventErr) {
-    return jsonError("server_error", "Ошибка чтения события.", 500);
+    return jsonError("server_error", "Ошибка чтения события.", 500, cors);
   }
   if (!event) {
-    return jsonError("not_found", "Событие не найдено.", 404);
+    return jsonError("not_found", "Событие не найдено.", 404, cors);
   }
 
   // 3. Только хост события.
   if (event.host_id !== authUid) {
-    return jsonError("not_host", "Только хост может проявить событие.", 403);
+    return jsonError("not_host", "Только хост может проявить событие.", 403, cors);
   }
 
   // 4. Уже проявлено.
   if (event.status === "revealed") {
-    return jsonError("already_revealed", "Событие уже проявлено.", 409);
+    return jsonError("already_revealed", "Событие уже проявлено.", 409, cors);
   }
 
   // 5. Закрытое событие проявить нельзя.
   if (event.status === "archived" || event.status === "deleted") {
-    return jsonError("event_closed", "Событие закрыто.", 410);
+    return jsonError("event_closed", "Событие закрыто.", 410, cors);
   }
 
   // 6. Переход в revealed. Условие по статусу — страховка от гонки с авто-проявкой.
@@ -99,8 +102,8 @@ Deno.serve(async (req: Request): Promise<Response> => {
     .eq("id", eventId)
     .in("status", ["draft", "live"]);
   if (updErr) {
-    return jsonError("server_error", "Не удалось проявить событие.", 500);
+    return jsonError("server_error", "Не удалось проявить событие.", 500, cors);
   }
 
-  return jsonOk({ ok: true, status: "revealed" }, 200);
+  return jsonOk({ ok: true, status: "revealed" }, 200, cors);
 });

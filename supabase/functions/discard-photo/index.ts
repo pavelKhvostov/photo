@@ -21,7 +21,7 @@
 // пробуем storage.remove(storage_path) в try/catch — ошибка не валит удаление строки.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { handlePreflight } from "../_shared/cors.ts";
+import { corsHeadersFor, handlePreflight } from "../_shared/cors.ts";
 import { jsonError, jsonOk } from "../_shared/errors.ts";
 
 const BUCKET = "event-photos";
@@ -34,21 +34,24 @@ Deno.serve(async (req: Request): Promise<Response> => {
   const preflight = handlePreflight(req);
   if (preflight) return preflight;
 
+  // M5: origin-зависимые CORS-заголовки.
+  const cors = corsHeadersFor(req);
+
   if (req.method !== "POST") {
-    return jsonError("method_not_allowed", "Только POST.", 405);
+    return jsonError("method_not_allowed", "Только POST.", 405, cors);
   }
 
   // 1. Авторизация: JWT гостя.
   const authHeader = req.headers.get("Authorization") ?? "";
   const jwt = authHeader.replace(/^Bearer\s+/i, "").trim();
   if (!jwt) {
-    return jsonError("unauthorized", "Отсутствует Bearer-токен.", 401);
+    return jsonError("unauthorized", "Отсутствует Bearer-токен.", 401, cors);
   }
 
   const supabaseUrl = Deno.env.get("SUPABASE_URL");
   const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
   if (!supabaseUrl || !serviceKey) {
-    return jsonError("server_misconfigured", "Сервер не настроен.", 500);
+    return jsonError("server_misconfigured", "Сервер не настроен.", 500, cors);
   }
 
   const supabase = createClient(supabaseUrl, serviceKey, {
@@ -57,7 +60,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   const { data: userData, error: userErr } = await supabase.auth.getUser(jwt);
   if (userErr || !userData?.user) {
-    return jsonError("unauthorized", "Невалидный токен гостя.", 401);
+    return jsonError("unauthorized", "Невалидный токен гостя.", 401, cors);
   }
   const authUid = userData.user.id;
 
@@ -66,11 +69,11 @@ Deno.serve(async (req: Request): Promise<Response> => {
   try {
     body = await req.json() as DiscardBody;
   } catch {
-    return jsonError("validation", "Тело запроса должно быть JSON.", 422);
+    return jsonError("validation", "Тело запроса должно быть JSON.", 422, cors);
   }
   const photoId = typeof body.photo_id === "string" ? body.photo_id.trim() : "";
   if (!photoId) {
-    return jsonError("validation", "Поле photo_id обязательно.", 422);
+    return jsonError("validation", "Поле photo_id обязательно.", 422, cors);
   }
 
   // 3. Поиск кадра.
@@ -80,10 +83,10 @@ Deno.serve(async (req: Request): Promise<Response> => {
     .eq("id", photoId)
     .maybeSingle();
   if (photoErr) {
-    return jsonError("server_error", "Ошибка чтения кадра.", 500);
+    return jsonError("server_error", "Ошибка чтения кадра.", 500, cors);
   }
   if (!photo) {
-    return jsonError("not_found", "Кадр не найден.", 404);
+    return jsonError("not_found", "Кадр не найден.", 404, cors);
   }
 
   // 4. Право: кадр должен принадлежать гостю ТЕКУЩЕЙ сессии в событии кадра.
@@ -94,10 +97,10 @@ Deno.serve(async (req: Request): Promise<Response> => {
     .eq("auth_uid", authUid)
     .maybeSingle();
   if (guestErr) {
-    return jsonError("server_error", "Ошибка проверки гостя.", 500);
+    return jsonError("server_error", "Ошибка проверки гостя.", 500, cors);
   }
   if (!guest || guest.id !== photo.guest_id) {
-    return jsonError("forbidden", "Кадр принадлежит другому гостю.", 403);
+    return jsonError("forbidden", "Кадр принадлежит другому гостю.", 403, cors);
   }
 
   // 5. Удалять можно ТОЛЬКО резерв. Загруженный кадр — не резерв, не трогаем.
@@ -106,6 +109,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
       "already_uploaded",
       "Кадр уже загружен — это не резерв, удаление здесь запрещено.",
       409,
+      cors
     );
   }
 
@@ -135,8 +139,8 @@ Deno.serve(async (req: Request): Promise<Response> => {
     .eq("id", photoId)
     .eq("uploaded", false);
   if (delErr) {
-    return jsonError("server_error", "Не удалось удалить резерв кадра.", 500);
+    return jsonError("server_error", "Не удалось удалить резерв кадра.", 500, cors);
   }
 
-  return jsonOk({ ok: true }, 200);
+  return jsonOk({ ok: true }, 200, cors);
 });

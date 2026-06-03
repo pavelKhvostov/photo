@@ -35,7 +35,7 @@
 // → 500 (клиент узнаёт, что отзыв не зафиксирован), а не молчаливое игнорирование.
 
 import { createClient, SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { handlePreflight } from "../_shared/cors.ts";
+import { corsHeadersFor, handlePreflight } from "../_shared/cors.ts";
 import { jsonError, jsonOk } from "../_shared/errors.ts";
 
 const BUCKET = "event-photos";
@@ -49,21 +49,24 @@ Deno.serve(async (req: Request): Promise<Response> => {
   const preflight = handlePreflight(req);
   if (preflight) return preflight;
 
+  // M5: origin-зависимые CORS-заголовки.
+  const cors = corsHeadersFor(req);
+
   if (req.method !== "POST") {
-    return jsonError("method_not_allowed", "Только POST.", 405);
+    return jsonError("method_not_allowed", "Только POST.", 405, cors);
   }
 
   // 1. Авторизация: JWT субъекта.
   const authHeader = req.headers.get("Authorization") ?? "";
   const jwt = authHeader.replace(/^Bearer\s+/i, "").trim();
   if (!jwt) {
-    return jsonError("unauthorized", "Отсутствует Bearer-токен.", 401);
+    return jsonError("unauthorized", "Отсутствует Bearer-токен.", 401, cors);
   }
 
   const supabaseUrl = Deno.env.get("SUPABASE_URL");
   const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
   if (!supabaseUrl || !serviceKey) {
-    return jsonError("server_misconfigured", "Сервер не настроен.", 500);
+    return jsonError("server_misconfigured", "Сервер не настроен.", 500, cors);
   }
 
   const supabase = createClient(supabaseUrl, serviceKey, {
@@ -72,7 +75,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   const { data: userData, error: userErr } = await supabase.auth.getUser(jwt);
   if (userErr || !userData?.user) {
-    return jsonError("unauthorized", "Невалидный токен.", 401);
+    return jsonError("unauthorized", "Невалидный токен.", 401, cors);
   }
   const authUid = userData.user.id;
 
@@ -81,13 +84,13 @@ Deno.serve(async (req: Request): Promise<Response> => {
   try {
     body = await req.json() as RevokeBody;
   } catch {
-    return jsonError("validation", "Тело запроса должно быть JSON.", 422);
+    return jsonError("validation", "Тело запроса должно быть JSON.", 422, cors);
   }
   const consentId = typeof body.consent_id === "string"
     ? body.consent_id.trim()
     : "";
   if (!consentId) {
-    return jsonError("validation", "Поле consent_id обязательно.", 422);
+    return jsonError("validation", "Поле consent_id обязательно.", 422, cors);
   }
 
   // 3. Поиск согласия.
@@ -97,20 +100,20 @@ Deno.serve(async (req: Request): Promise<Response> => {
     .eq("id", consentId)
     .maybeSingle();
   if (consentErr) {
-    return jsonError("server_error", "Ошибка чтения согласия.", 500);
+    return jsonError("server_error", "Ошибка чтения согласия.", 500, cors);
   }
   if (!consent) {
-    return jsonError("not_found", "Согласие не найдено.", 404);
+    return jsonError("not_found", "Согласие не найдено.", 404, cors);
   }
 
   // 4. Право: субъект отзывает ТОЛЬКО своё согласие.
   if (consent.subject_uid !== authUid) {
-    return jsonError("forbidden", "Нельзя отозвать чужое согласие.", 403);
+    return jsonError("forbidden", "Нельзя отозвать чужое согласие.", 403, cors);
   }
 
   // 5. Идемпотентность: уже отозвано → no-op.
   if (consent.revoked_at !== null) {
-    return jsonOk({ ok: true, already_revoked: true }, 200);
+    return jsonOk({ ok: true, already_revoked: true }, 200, cors);
   }
 
   // 6. Каскад по СУБЪЕКТУ: все гости субъекта во всех событиях
@@ -120,7 +123,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
     .select("id")
     .eq("auth_uid", authUid);
   if (guestsErr) {
-    return jsonError("server_error", "Ошибка чтения гостей.", 500);
+    return jsonError("server_error", "Ошибка чтения гостей.", 500, cors);
   }
 
   // 6а. Собрать пути всех фото субъекта (Storage чистим ДО удаления строк).
@@ -147,7 +150,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
   // вызов дочистит: согласие ещё не отозвано).
   if (errors.length > 0) {
     console.error("[revoke-consent] enumerate failure:", JSON.stringify(errors));
-    return jsonError("server_error", "Не удалось перечислить фото субъекта.", 500);
+    return jsonError("server_error", "Не удалось перечислить фото субъекта.", 500, cors);
   }
 
   // 6б. Физическое удаление объектов Storage (батчами ≤1000) — ДО строк БД.
@@ -158,7 +161,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
     console.error("[revoke-consent] storage remove failed:", message);
     // Не удаляем строки и не помечаем согласие отозванным → повторный вызов
     // идемпотентно дочистит (согласие остаётся неотозванным).
-    return jsonError("server_error", "Не удалось удалить объекты Storage.", 500);
+    return jsonError("server_error", "Не удалось удалить объекты Storage.", 500, cors);
   }
 
   // 7. Атомарная БД-часть: delete guests субъекта + set revoked_at + аудит
@@ -170,21 +173,22 @@ Deno.serve(async (req: Request): Promise<Response> => {
   if (rpcErr) {
     // Аудит/отзыв НЕ зафиксированы → клиент должен знать (152-ФЗ доказательная база).
     console.error("[revoke-consent] rpc failed:", rpcErr.message);
-    return jsonError("server_error", "Не удалось зафиксировать отзыв согласия.", 500);
+    return jsonError("server_error", "Не удалось зафиксировать отзыв согласия.", 500, cors);
   }
 
   const row = Array.isArray(rpcData) ? rpcData[0] : rpcData;
   if (row?.already_revoked) {
     // Гонка: кто-то отозвал между нашим select (шаг 5) и RPC. Объекты Storage уже
     // могли быть снесены — это безопасно (remove идемпотентен).
-    return jsonOk({ ok: true, already_revoked: true }, 200);
+    return jsonOk({ ok: true, already_revoked: true }, 200, cors);
   }
 
   return jsonOk({
     ok: true,
     photos_removed: allPaths.length,
     guests_removed: (row?.guests_removed as number | undefined) ?? 0,
-  }, 200);
+  }, 200,
+  cors);
 });
 
 // Удаляет объекты Storage батчами ≤1000. remove на несуществующий путь — no-op.

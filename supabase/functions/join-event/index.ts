@@ -32,7 +32,7 @@
 // заголовков), обновляем guests.consent_id и только тогда возвращаем сессию.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { handlePreflight } from "../_shared/cors.ts";
+import { corsHeadersFor, handlePreflight } from "../_shared/cors.ts";
 import { jsonError, jsonOk } from "../_shared/errors.ts";
 
 // Очень большое число для безлимитных планов (plans.shots_per_guest == 0).
@@ -63,21 +63,24 @@ Deno.serve(async (req: Request): Promise<Response> => {
   const preflight = handlePreflight(req);
   if (preflight) return preflight;
 
+  // M5: origin-зависимые CORS-заголовки.
+  const cors = corsHeadersFor(req);
+
   if (req.method !== "POST") {
-    return jsonError("method_not_allowed", "Только POST.", 405);
+    return jsonError("method_not_allowed", "Только POST.", 405, cors);
   }
 
   // 1. Авторизация: анонимный JWT гостя.
   const authHeader = req.headers.get("Authorization") ?? "";
   const jwt = authHeader.replace(/^Bearer\s+/i, "").trim();
   if (!jwt) {
-    return jsonError("unauthorized", "Отсутствует Bearer-токен.", 401);
+    return jsonError("unauthorized", "Отсутствует Bearer-токен.", 401, cors);
   }
 
   const supabaseUrl = Deno.env.get("SUPABASE_URL");
   const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
   if (!supabaseUrl || !serviceKey) {
-    return jsonError("server_misconfigured", "Сервер не настроен.", 500);
+    return jsonError("server_misconfigured", "Сервер не настроен.", 500, cors);
   }
 
   // service-role клиент: обходит RLS, проверки делаем сами.
@@ -87,7 +90,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   const { data: userData, error: userErr } = await supabase.auth.getUser(jwt);
   if (userErr || !userData?.user) {
-    return jsonError("unauthorized", "Невалидный токен гостя.", 401);
+    return jsonError("unauthorized", "Невалидный токен гостя.", 401, cors);
   }
   const authUid = userData.user.id;
 
@@ -96,14 +99,14 @@ Deno.serve(async (req: Request): Promise<Response> => {
   try {
     body = await req.json() as JoinBody;
   } catch {
-    return jsonError("validation", "Тело запроса должно быть JSON.", 422);
+    return jsonError("validation", "Тело запроса должно быть JSON.", 422, cors);
   }
 
   const shortCode = typeof body.short_code === "string"
     ? body.short_code.trim()
     : "";
   if (!shortCode) {
-    return jsonError("validation", "Поле short_code обязательно.", 422);
+    return jsonError("validation", "Поле short_code обязательно.", 422, cors);
   }
 
   const displayName = typeof body.display_name === "string"
@@ -114,6 +117,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
       "validation",
       "display_name должен быть от 1 до 60 символов.",
       422,
+      cors
     );
   }
 
@@ -131,6 +135,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
       "consent_required",
       "Требуется согласие на загрузку фото (purpose=photo_upload, policy_version).",
       422,
+      cors
     );
   }
 
@@ -142,15 +147,15 @@ Deno.serve(async (req: Request): Promise<Response> => {
     .maybeSingle();
 
   if (eventErr) {
-    return jsonError("server_error", "Ошибка чтения события.", 500);
+    return jsonError("server_error", "Ошибка чтения события.", 500, cors);
   }
   if (!event) {
-    return jsonError("not_found", "Событие не найдено.", 404);
+    return jsonError("not_found", "Событие не найдено.", 404, cors);
   }
 
   // 4. Статус события.
   if (event.status === "archived" || event.status === "deleted") {
-    return jsonError("event_closed", "Событие закрыто.", 410);
+    return jsonError("event_closed", "Событие закрыто.", 410, cors);
   }
   if (event.status === "draft") {
     const { error: liveErr } = await supabase
@@ -159,7 +164,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
       .eq("id", event.id)
       .eq("status", "draft"); // не перетираем, если статус уже сменился
     if (liveErr) {
-      return jsonError("server_error", "Не удалось активировать событие.", 500);
+      return jsonError("server_error", "Не удалось активировать событие.", 500, cors);
     }
   }
 
@@ -170,7 +175,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
     .eq("code", event.plan)
     .maybeSingle();
   if (planErr || !plan) {
-    return jsonError("server_error", "Тариф события не найден.", 500);
+    return jsonError("server_error", "Тариф события не найден.", 500, cors);
   }
 
   // Подсчёт shots_left для гостя.
@@ -216,7 +221,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
     .eq("auth_uid", authUid)
     .maybeSingle();
   if (existingErr) {
-    return jsonError("server_error", "Ошибка проверки гостя.", 500);
+    return jsonError("server_error", "Ошибка проверки гостя.", 500, cors);
   }
 
   // Идемпотентный ответ существующего гостя с проверкой/переоформлением согласия.
@@ -241,6 +246,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
           "server_error",
           "Не удалось переоформить согласие.",
           500,
+          cors
         );
       }
       const { error: updErr } = await supabase
@@ -252,6 +258,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
           "server_error",
           "Не удалось обновить согласие гостя.",
           500,
+          cors
         );
       }
     }
@@ -264,7 +271,8 @@ Deno.serve(async (req: Request): Promise<Response> => {
       reveal_at: event.reveal_at ?? null,
       starts_at: event.starts_at ?? null,
       camera_style: event.camera_style,
-    }, 200);
+    }, 200,
+    cors);
   };
 
   if (existing) {
@@ -283,7 +291,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
   // 6. Согласие пишем ДО создания гостя (152-ФЗ: IP/UA из заголовков).
   const consentId = await writeConsent();
   if (!consentId) {
-    return jsonError("server_error", "Не удалось зафиксировать согласие.", 500);
+    return jsonError("server_error", "Не удалось зафиксировать согласие.", 500, cors);
   }
 
   // 7. Атомарное вступление: проверка лимита + insert под advisory-lock (миграция 0003).
@@ -299,12 +307,12 @@ Deno.serve(async (req: Request): Promise<Response> => {
     },
   );
   if (rpcErr) {
-    return jsonError("server_error", "Не удалось создать гостя.", 500);
+    return jsonError("server_error", "Не удалось создать гостя.", 500, cors);
   }
 
   const result = Array.isArray(rpcRows) ? rpcRows[0] : rpcRows;
   if (!result) {
-    return jsonError("server_error", "Не удалось создать гостя.", 500);
+    return jsonError("server_error", "Не удалось создать гостя.", 500, cors);
   }
 
   // 7a. Лимит гостей достигнут — гость НЕ вставлен.
@@ -313,6 +321,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
       "guests_limit_reached",
       "Достигнут лимит гостей по тарифу события.",
       409,
+      cors
     );
   }
 
@@ -327,7 +336,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
       .eq("id", result.guest_id)
       .maybeSingle();
     if (!racedRow) {
-      return jsonError("server_error", "Не удалось создать гостя.", 500);
+      return jsonError("server_error", "Не удалось создать гостя.", 500, cors);
     }
     const rawJoin = (racedRow as { consents?: unknown }).consents;
     const consentJoin = Array.isArray(rawJoin)
@@ -352,5 +361,6 @@ Deno.serve(async (req: Request): Promise<Response> => {
     reveal_at: event.reveal_at ?? null,
     starts_at: event.starts_at ?? null,
     camera_style: event.camera_style,
-  }, 201);
+  }, 201,
+  cors);
 });

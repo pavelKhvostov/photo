@@ -18,7 +18,7 @@
 // storage_path.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { handlePreflight } from "../_shared/cors.ts";
+import { corsHeadersFor, handlePreflight } from "../_shared/cors.ts";
 import { jsonError, jsonOk } from "../_shared/errors.ts";
 
 const BUCKET = "event-photos";
@@ -34,21 +34,24 @@ Deno.serve(async (req: Request): Promise<Response> => {
   const preflight = handlePreflight(req);
   if (preflight) return preflight;
 
+  // M5: origin-зависимые CORS-заголовки.
+  const cors = corsHeadersFor(req);
+
   if (req.method !== "POST") {
-    return jsonError("method_not_allowed", "Только POST.", 405);
+    return jsonError("method_not_allowed", "Только POST.", 405, cors);
   }
 
   // 1. Авторизация: JWT субъекта.
   const authHeader = req.headers.get("Authorization") ?? "";
   const jwt = authHeader.replace(/^Bearer\s+/i, "").trim();
   if (!jwt) {
-    return jsonError("unauthorized", "Отсутствует Bearer-токен.", 401);
+    return jsonError("unauthorized", "Отсутствует Bearer-токен.", 401, cors);
   }
 
   const supabaseUrl = Deno.env.get("SUPABASE_URL");
   const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
   if (!supabaseUrl || !serviceKey) {
-    return jsonError("server_misconfigured", "Сервер не настроен.", 500);
+    return jsonError("server_misconfigured", "Сервер не настроен.", 500, cors);
   }
 
   const supabase = createClient(supabaseUrl, serviceKey, {
@@ -57,7 +60,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   const { data: userData, error: userErr } = await supabase.auth.getUser(jwt);
   if (userErr || !userData?.user) {
-    return jsonError("unauthorized", "Невалидный токен.", 401);
+    return jsonError("unauthorized", "Невалидный токен.", 401, cors);
   }
   const authUid = userData.user.id;
 
@@ -66,7 +69,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
   try {
     body = await req.json() as DeletionBody;
   } catch {
-    return jsonError("validation", "Тело запроса должно быть JSON.", 422);
+    return jsonError("validation", "Тело запроса должно быть JSON.", 422, cors);
   }
 
   const scope = typeof body.scope === "string" ? body.scope.trim() : "";
@@ -75,6 +78,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
       "validation",
       "scope должен быть одним из: photo, guest, account.",
       422,
+      cors
     );
   }
 
@@ -87,6 +91,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
       "validation",
       "Для scope=photo поле target_id (id фото) обязательно.",
       422,
+      cors
     );
   }
 
@@ -99,10 +104,10 @@ Deno.serve(async (req: Request): Promise<Response> => {
       .eq("id", targetId)
       .maybeSingle();
     if (photoErr) {
-      return jsonError("server_error", "Ошибка чтения кадра.", 500);
+      return jsonError("server_error", "Ошибка чтения кадра.", 500, cors);
     }
     if (!photo) {
-      return jsonError("not_found", "Кадр не найден.", 404);
+      return jsonError("not_found", "Кадр не найден.", 404, cors);
     }
 
     // Проверка авторства: гость фото должен принадлежать этому auth_uid.
@@ -113,11 +118,11 @@ Deno.serve(async (req: Request): Promise<Response> => {
       .eq("auth_uid", authUid)
       .maybeSingle();
     if (guestErr) {
-      return jsonError("server_error", "Ошибка проверки гостя.", 500);
+      return jsonError("server_error", "Ошибка проверки гостя.", 500, cors);
     }
     if (!guest) {
       // Фото не принадлежит субъекту — это не сценарий самоудаления.
-      return jsonError("forbidden", "Кадр принадлежит другому субъекту.", 403);
+      return jsonError("forbidden", "Кадр принадлежит другому субъекту.", 403, cors);
     }
 
     // 3а. Storage ДО строки БД (инвариант 152-ФЗ).
@@ -127,7 +132,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
         .from(BUCKET)
         .remove([storagePath]);
       if (rmErr) {
-        return jsonError("server_error", "Не удалось удалить объект Storage.", 500);
+        return jsonError("server_error", "Не удалось удалить объект Storage.", 500, cors);
       }
     }
 
@@ -137,7 +142,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
       .delete()
       .eq("id", targetId);
     if (delErr) {
-      return jsonError("server_error", "Не удалось удалить кадр.", 500);
+      return jsonError("server_error", "Не удалось удалить кадр.", 500, cors);
     }
 
     processed = true;
@@ -155,8 +160,8 @@ Deno.serve(async (req: Request): Promise<Response> => {
     .select("id")
     .single();
   if (insErr || !reqRow) {
-    return jsonError("server_error", "Не удалось зарегистрировать запрос.", 500);
+    return jsonError("server_error", "Не удалось зарегистрировать запрос.", 500, cors);
   }
 
-  return jsonOk({ request_id: reqRow.id, processed }, 201);
+  return jsonOk({ request_id: reqRow.id, processed }, 201, cors);
 });

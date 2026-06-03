@@ -9,8 +9,9 @@
 // бакет, 152-ФЗ), иначе null.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { handlePreflight } from "../_shared/cors.ts";
+import { corsHeadersFor, handlePreflight } from "../_shared/cors.ts";
 import { jsonError, jsonOk } from "../_shared/errors.ts";
+import { toPublicUrl } from "../_shared/storage.ts";
 
 const BUCKET = "event-photos";
 const TTL = 600;
@@ -19,21 +20,24 @@ Deno.serve(async (req: Request): Promise<Response> => {
   const preflight = handlePreflight(req);
   if (preflight) return preflight;
 
+  // M5: origin-зависимые CORS-заголовки.
+  const cors = corsHeadersFor(req);
+
   if (req.method !== "GET") {
-    return jsonError("method_not_allowed", "Только GET.", 405);
+    return jsonError("method_not_allowed", "Только GET.", 405, cors);
   }
 
   // 1. short_code из query.
   const shortCode = new URL(req.url).searchParams.get("short_code")?.trim() ??
     "";
   if (!shortCode) {
-    return jsonError("validation", "Параметр short_code обязателен.", 422);
+    return jsonError("validation", "Параметр short_code обязателен.", 422, cors);
   }
 
   const supabaseUrl = Deno.env.get("SUPABASE_URL");
   const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
   if (!supabaseUrl || !serviceKey) {
-    return jsonError("server_misconfigured", "Сервер не настроен.", 500);
+    return jsonError("server_misconfigured", "Сервер не настроен.", 500, cors);
   }
 
   // service-role: читаем без RLS, но отдаём строго безопасный набор полей.
@@ -49,15 +53,15 @@ Deno.serve(async (req: Request): Promise<Response> => {
     .eq("short_code", shortCode)
     .maybeSingle();
   if (eventErr) {
-    return jsonError("server_error", "Ошибка чтения события.", 500);
+    return jsonError("server_error", "Ошибка чтения события.", 500, cors);
   }
   if (!event) {
-    return jsonError("not_found", "Событие не найдено.", 404);
+    return jsonError("not_found", "Событие не найдено.", 404, cors);
   }
 
   // 3. Архивные/удалённые события не показываем.
   if (event.status === "archived" || event.status === "deleted") {
-    return jsonError("event_archived", "Событие закрыто.", 410);
+    return jsonError("event_archived", "Событие закрыто.", 410, cors);
   }
 
   // 4. cover_url — подписанный URL, если есть обложка.
@@ -78,22 +82,5 @@ Deno.serve(async (req: Request): Promise<Response> => {
     reveal_at: event.reveal_at ?? null,
     starts_at: event.starts_at ?? null,
     cover_url: coverUrl,
-  }, 200);
+  }, 200, cors);
 });
-
-// Подмена внутреннего origin storage (kong:8000 на локалке) на публичный,
-// доступный браузеру. На проде PUBLIC_STORAGE_URL = публичный домен → no-op.
-function toPublicUrl(signedUrl: string): string {
-  const publicBase = Deno.env.get("PUBLIC_STORAGE_URL") ??
-    Deno.env.get("PUBLIC_SUPABASE_URL") ??
-    "http://127.0.0.1:54321";
-  try {
-    const u = new URL(signedUrl);
-    const pub = new URL(publicBase);
-    u.protocol = pub.protocol;
-    u.host = pub.host;
-    return u.toString();
-  } catch {
-    return signedUrl;
-  }
-}

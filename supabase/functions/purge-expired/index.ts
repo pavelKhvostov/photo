@@ -28,7 +28,7 @@
 // прогон — копим в errors[] и продолжаем.
 
 import { createClient, SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { handlePreflight } from "../_shared/cors.ts";
+import { corsHeadersFor, handlePreflight } from "../_shared/cors.ts";
 import { jsonError, jsonOk } from "../_shared/errors.ts";
 
 const BUCKET = "event-photos";
@@ -46,8 +46,11 @@ Deno.serve(async (req: Request): Promise<Response> => {
   const preflight = handlePreflight(req);
   if (preflight) return preflight;
 
+  // M5: origin-зависимые CORS-заголовки.
+  const cors = corsHeadersFor(req);
+
   if (req.method !== "POST") {
-    return jsonError("method_not_allowed", "Только POST.", 405);
+    return jsonError("method_not_allowed", "Только POST.", 405, cors);
   }
 
   // 1. Авторизация по служебному секрету (fail-closed, M3).
@@ -58,17 +61,17 @@ Deno.serve(async (req: Request): Promise<Response> => {
       "[purge-expired] PURGE_SECRET не задан — отказ (fail-closed). " +
         "Задайте PURGE_SECRET в окружении функции.",
     );
-    return jsonError("server_misconfigured", "Сервер не настроен.", 500);
+    return jsonError("server_misconfigured", "Сервер не настроен.", 500, cors);
   }
   const provided = req.headers.get("x-purge-secret") ?? "";
   if (provided !== expectedSecret) {
-    return jsonError("unauthorized", "Неверный или отсутствующий секрет.", 401);
+    return jsonError("unauthorized", "Неверный или отсутствующий секрет.", 401, cors);
   }
 
   const supabaseUrl = Deno.env.get("SUPABASE_URL");
   const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
   if (!supabaseUrl || !serviceKey) {
-    return jsonError("server_misconfigured", "Сервер не настроен.", 500);
+    return jsonError("server_misconfigured", "Сервер не настроен.", 500, cors);
   }
 
   const supabase = createClient(supabaseUrl, serviceKey, {
@@ -82,7 +85,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
     .eq("status", "deleted")
     .limit(EVENT_BATCH);
   if (eventsErr) {
-    return jsonError("server_error", "Ошибка выборки событий.", 500);
+    return jsonError("server_error", "Ошибка выборки событий.", 500, cors);
   }
 
   let eventsPurged = 0;
@@ -124,7 +127,8 @@ Deno.serve(async (req: Request): Promise<Response> => {
     events_purged: eventsPurged,
     objects_removed: objectsRemoved,
     errors,
-  }, 200);
+  }, 200,
+  cors);
 });
 
 // Собирает полные пути всех объектов события в бакете event-photos.

@@ -17,8 +17,9 @@
 // not_found, как будто кадра нет (не раскрываем существование резерва).
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { handlePreflight } from "../_shared/cors.ts";
+import { corsHeadersFor, handlePreflight } from "../_shared/cors.ts";
 import { jsonError, jsonOk } from "../_shared/errors.ts";
+import { toPublicUrl } from "../_shared/storage.ts";
 
 const BUCKET = "event-photos";
 const TTL = 600;
@@ -31,21 +32,24 @@ Deno.serve(async (req: Request): Promise<Response> => {
   const preflight = handlePreflight(req);
   if (preflight) return preflight;
 
+  // M5: origin-зависимые CORS-заголовки (приватные данные — фото).
+  const cors = corsHeadersFor(req);
+
   if (req.method !== "GET" && req.method !== "POST") {
-    return jsonError("method_not_allowed", "Только GET или POST.", 405);
+    return jsonError("method_not_allowed", "Только GET или POST.", 405, cors);
   }
 
   // 1. Авторизация: JWT гостя или хоста.
   const authHeader = req.headers.get("Authorization") ?? "";
   const jwt = authHeader.replace(/^Bearer\s+/i, "").trim();
   if (!jwt) {
-    return jsonError("unauthorized", "Отсутствует Bearer-токен.", 401);
+    return jsonError("unauthorized", "Отсутствует Bearer-токен.", 401, cors);
   }
 
   const supabaseUrl = Deno.env.get("SUPABASE_URL");
   const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
   if (!supabaseUrl || !serviceKey) {
-    return jsonError("server_misconfigured", "Сервер не настроен.", 500);
+    return jsonError("server_misconfigured", "Сервер не настроен.", 500, cors);
   }
 
   const supabase = createClient(supabaseUrl, serviceKey, {
@@ -54,7 +58,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   const { data: userData, error: userErr } = await supabase.auth.getUser(jwt);
   if (userErr || !userData?.user) {
-    return jsonError("unauthorized", "Невалидный токен.", 401);
+    return jsonError("unauthorized", "Невалидный токен.", 401, cors);
   }
   const authUid = userData.user.id;
 
@@ -71,7 +75,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
     }
   }
   if (!photoId) {
-    return jsonError("not_found", "Кадр не найден.", 404);
+    return jsonError("not_found", "Кадр не найден.", 404, cors);
   }
 
   const { data: photo, error: photoErr } = await supabase
@@ -80,16 +84,16 @@ Deno.serve(async (req: Request): Promise<Response> => {
     .eq("id", photoId)
     .maybeSingle();
   if (photoErr) {
-    return jsonError("server_error", "Ошибка чтения кадра.", 500);
+    return jsonError("server_error", "Ошибка чтения кадра.", 500, cors);
   }
   if (!photo) {
-    return jsonError("not_found", "Кадр не найден.", 404);
+    return jsonError("not_found", "Кадр не найден.", 404, cors);
   }
 
   // 2a. Незагруженный кадр (резерв) — для всех = «не найден» (§6.3). Объекта в
   // Storage ещё нет, выдача URL дала бы битую картинку.
   if (photo.uploaded !== true) {
-    return jsonError("not_found", "Кадр не найден.", 404);
+    return jsonError("not_found", "Кадр не найден.", 404, cors);
   }
 
   // 3. Видимость по правилам RLS photos (воспроизводим вручную под service-role).
@@ -99,7 +103,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
     .eq("id", photo.event_id)
     .maybeSingle();
   if (eventErr || !event) {
-    return jsonError("server_error", "Ошибка чтения события.", 500);
+    return jsonError("server_error", "Ошибка чтения события.", 500, cors);
   }
 
   const isHost = event.host_id === authUid;
@@ -117,11 +121,11 @@ Deno.serve(async (req: Request): Promise<Response> => {
       .eq("auth_uid", authUid)
       .maybeSingle();
     if (guestErr) {
-      return jsonError("server_error", "Ошибка проверки гостя.", 500);
+      return jsonError("server_error", "Ошибка проверки гостя.", 500, cors);
     }
     if (!guest) {
       // Не хост и не гость события.
-      return jsonError("forbidden", "Нет доступа к кадру.", 403);
+      return jsonError("forbidden", "Нет доступа к кадру.", 403, cors);
     }
     if (guest.id === photo.guest_id) {
       // Своё фото — видно всегда.
@@ -136,7 +140,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
   }
 
   if (!visible) {
-    return jsonError("forbidden", "Кадр ещё не проявлен.", 403);
+    return jsonError("forbidden", "Кадр ещё не проявлен.", 403, cors);
   }
 
   // 4. Подписанный GET-URL с TTL.
@@ -144,27 +148,8 @@ Deno.serve(async (req: Request): Promise<Response> => {
     .from(BUCKET)
     .createSignedUrl(photo.storage_path, TTL);
   if (signErr || !signed) {
-    return jsonError("server_error", "Не удалось выдать URL.", 500);
+    return jsonError("server_error", "Не удалось выдать URL.", 500, cors);
   }
 
-  return jsonOk({ url: toPublicUrl(signed.signedUrl), expires_in: TTL }, 200);
+  return jsonOk({ url: toPublicUrl(signed.signedUrl), expires_in: TTL }, 200, cors);
 });
-
-// На локалке storage подписывает URL внутренним хостом Docker-сети (http://kong:8000),
-// который НЕ резолвится из браузера. Подменяем origin на публичный, доступный клиенту.
-// PUBLIC_STORAGE_URL задаётся в окружении; на проде = публичный домен (подмена no-op,
-// т.к. SUPABASE_URL уже публичный). Путь и подпись (токен) не трогаем.
-function toPublicUrl(signedUrl: string): string {
-  const publicBase = Deno.env.get("PUBLIC_STORAGE_URL") ??
-    Deno.env.get("PUBLIC_SUPABASE_URL") ??
-    "http://127.0.0.1:54321";
-  try {
-    const u = new URL(signedUrl);
-    const pub = new URL(publicBase);
-    u.protocol = pub.protocol;
-    u.host = pub.host; // host включает порт
-    return u.toString();
-  } catch {
-    return signedUrl;
-  }
-}
